@@ -1,0 +1,35 @@
+cmake_minimum_required(VERSION 3.20)
+
+# 启用CMP0167策略
+cmake_policy(SET CMP0167 NEW)
+
+
+# 项目信息
+project(iAudioVisualizer)
+
+# 设置C++标准
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED True)
+
+# 包含头文件目录
+include_directories(include)
+include_directories(kissfft)
+
+# 查找SFML库
+find_package(SFML 2.5 COMPONENTS graphics audio REQUIRED)
+
+# 查找Boost库
+find_package(Boost REQUIRED COMPONENTS filesystem program_options)
+
+# 添加可执行文件
+file(GLOB SOURCES "src/*.c")
+add_executable(iAudioVisualizer ${SOURCES} main.cpp)
+
+# 链接SFML库
+target_link_libraries(iAudioVisualizer sfml-graphics sfml-audio)
+
+# 链接Boost库
+if(Boost_FOUND)
+    include_directories(${Boost_INCLUDE_DIRS})
+    target_link_libraries(iAudioVisualizer ${Boost_LIBRARIES})
+endif()
