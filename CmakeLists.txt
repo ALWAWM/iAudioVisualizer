@@ -13,7 +13,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED True)
 
 # 包含头文件目录
 include_directories(include)
-include_directories(kissfft)
+include_directories(include/kissfft)
 
 # 查找SFML库
 find_package(SFML 2.5 COMPONENTS graphics audio REQUIRED)
@@ -22,8 +22,9 @@ find_package(SFML 2.5 COMPONENTS graphics audio REQUIRED)
 find_package(Boost REQUIRED COMPONENTS filesystem program_options)
 
 # 添加可执行文件
-file(GLOB SOURCES "src/*.c")
-add_executable(iAudioVisualizer ${SOURCES} main.cpp)
+file(GLOB SOURCES "src/*"  "include/kissfft/*.c")
+# list(APPEND SOURCES "include/kissfft/kiss_fft.c")
+add_executable(iAudioVisualizer ${SOURCES})
 
 # 链接SFML库
 target_link_libraries(iAudioVisualizer sfml-graphics sfml-audio)

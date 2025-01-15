@@ -1,29 +1,9 @@
 #pragma once
 #include "commonheaders.h"
 
-// 函数 printos：打印操作系统信息
-// 参数：
-//   - 无
-// 返回值：
-//   - 无
-void printos() {
-    // 检查操作系统并打印相应信息
-    #ifdef _WIN32
-        std::cout << "Operating System: Windows" << std::endl;
-    #elif defined(__linux__)
-        std::cout << "Operating System: Linux" << std::endl;
-    #elif defined(__APPLE__)
-        std::cout << "Operating System: Apple" << std::endl;
-    #elif defined(__unix__)
-        std::cout << "Operating System: Unix" << std::endl;
-    #endif
-}
-
 // 函数 sfwindowcenter：计算窗口中心点的坐标
-// 参数：
-//   - window: 要计算中心点的 sf::RenderWindow 对象
-// 返回值：
-//   - sf::Vector2u: 包含窗口中心点坐标的 sf::Vector2u 对象
+// @param window: 要计算中心点的 sf::RenderWindow 对象
+// @return sf::Vector2u: 包含窗口中心点坐标的 sf::Vector2u 对象
 sf::Vector2u sfwindowcenter(sf::RenderWindow& window) {
     // 获取窗口大小
     sf::Vector2u windowSize = window.getSize();
