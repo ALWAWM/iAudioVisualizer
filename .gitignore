@@ -26,7 +26,18 @@
 *.a
 *.lib
 
-# Executables
-*.exe
-*.out
-*.app
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.swp
+*.bak
+
+# Build directories
+/build/
+/dist/
+
+# IDE specific files
+.vscode/
+.idea/
