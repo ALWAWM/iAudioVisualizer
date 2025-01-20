@@ -1,9 +1,10 @@
+// avaudio.cpp
 #include "avaudio.h"
-#include <iostream>
-#include <cmath>
+#include "commonheaders.h"
 
-AVAudio::AVAudio(std::string musicName, std::string musicPath)
-    : musicName(musicName), musicPath(musicPath) {
+AVAudio::AVAudio(std::string musicPath, float defaultVolume, std::string musicName)
+    : musicPath(musicPath), volume(defaultVolume) {
+    //std::cout<<"音乐加载中"<<std::endl;
     try {
         if (!music.openFromFile(musicPath)) {
             throw loadException(musicPath, "music");
@@ -14,16 +15,23 @@ AVAudio::AVAudio(std::string musicName, std::string musicPath)
     } catch (const loadException& e) {
         std::cerr << e.what() << std::endl;
     }
+    if (musicName.empty()){
+        // 将string转换为path对象
+        std::filesystem::path pathObj(musicPath);
+        // 获取文件名（不包括扩展名）
+        this->musicName = pathObj.stem().string();
+    }
 }
 
+AVAudio::~AVAudio() = default;
 
 std::vector<float> AVAudio::analyzeFrequency(const std::vector<float>& audioSamples) {
     int N = audioSamples.size();
     int paddedN = 1;
-    while (paddedN < N) {
+    while (paddedN < N / 1000) {
         paddedN <<= 1;
     }
-
+    std::cout<<paddedN<<std::endl;
     std::vector<kiss_fft_cpx> in(paddedN);
     std::vector<kiss_fft_cpx> out(paddedN);
 
@@ -53,11 +61,46 @@ std::vector<float> AVAudio::analyzeFrequency(const std::vector<float>& audioSamp
 
     return magnitudes;
 }
+
+std::vector<float> AVAudio::getAudioSamples() {
+    sf::SoundBuffer buffer = this->buffer;
+
+    const sf::Int16* samples = buffer.getSamples();
+    std::size_t sampleCount = buffer.getSampleCount();
+    std::vector<float> audioSamples(sampleCount);
+
+    for (std::size_t i = 0; i < sampleCount; ++i) {
+        audioSamples[i] = static_cast<float>(samples[i]) / std::numeric_limits<sf::Int16>::max();
+    }
+
+    return audioSamples;
+}
+
 //*/
 std::string AVAudio::getMusicName() const {
     return musicName;
 }
 
+std::wstring AVAudio::getWideMusicName() const {
+    std::wstring_convert<std::codecvt_utf8<wchar_t>> converter;
+    std::wstring wideMusicName = converter.from_bytes(this->musicName);
+    return wideMusicName;
+}
+
 std::string AVAudio::getMusicPath() const {
     return musicPath;
 }
+
+void AVAudio::setMusicName(std::string newName) {
+    this->musicName = newName;
+}
+void AVAudio::setMusicPath(std::string newPath) {
+    this->musicPath = newPath;
+}
+
+void AVAudio::setVolume(){
+    this->music.setVolume(this->volume);
+}
+
+
+

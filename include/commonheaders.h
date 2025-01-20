@@ -6,6 +6,8 @@
 #include <SFML/Audio.hpp>
 #include <SFML/Window.hpp>
 
+//#include <TGUI/TGUI.hpp>
+
 #include <iostream>
 #include <cstdlib>
 #include <time.h>
@@ -16,7 +18,11 @@
 #include <getopt.h>
 #include <chrono>
 #include <stdio.h>
-
+#include <filesystem>
+#include <locale>
+#include <codecvt>
+#include <thread>
+#include <mutex>
 
 #include "ini.h"
 #include "kiss_fft.h"

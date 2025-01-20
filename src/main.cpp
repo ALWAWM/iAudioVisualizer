@@ -10,44 +10,85 @@
 //  The project is based on the SFML library.
 //  The project is using the C++17 language standard.
 //  
-#define i_Audio_Visualizer 1
-#define iAV 1
-#define iAudioVisualizer 1  
-#define iAV_Ver "0.2.1"
-unsigned int main_window_x_size = 1080u;
-unsigned int main_window_y_size = 720u;
 
 #include "allheaders.h"
 
+#ifdef __APPLE__
+    //MacOS平台,库正确时可以正常编译运行
+    #pragma optimize("g", on)  // 开启全局优化
+#else
+    #warning "暂不支持MacOS以外其他平台"
+#endif
+
+#define iAV iAV_Ver
+#define iAudioVisualizer iAV_Ver 
+
 using namespace std;
 
-string music_file = "./audio.mp3";
-string image_file = "./image.jpg";
-string ini_file = "conf.ini";
+struct configuration {
+    unsigned int main_window_x_size = 1920u;
+    unsigned int main_window_y_size = 1080u;
+    sf::Vector2u windowSize = {main_window_x_size, main_window_y_size};
+    std::string music_file = "./audio.mp3";
+    std::string cover_file = "./image.jpg";
+    std::string ini_file = "conf.ini";
+    std::string conf_version = "NULL";
+    bool mandatory_version_requirement = false;
+    sf::View view;
+    float default_volume = 100.0f;
+    bool shake_effect = true;
+}config;
 
-// 解析版本号字符串
-tuple<int, int, int> parseVersion(const string& version) {
-    int major = 0, minor = 0, patch = 0;
-    sscanf(version.c_str(), "%d.%d.%d", &major, &minor, &patch);
-    return make_tuple(major, minor, patch);
-}
-// 比较版本号
-bool isVersionGreater(const string& version1, const string& version2) {
-    auto [major1, minor1, patch1] = parseVersion(version1);
-    auto [major2, minor2, patch2] = parseVersion(version2);
-
-    if (major1 != major2) return major1 > major2;
-    if (minor1 != minor2) return minor1 > minor2;
-    return patch1 <= patch2;
-}
 // 解析INI文件的回调函数
 int iniHandler(void* user, const char* section, const char* name, const char* value) {
-    string* music_file = static_cast<string*>(user);
+    //configuration* config = static_cast<configuration*>(user);
+    if (strcmp(section, "Music") == 0) {
+        if (strcmp(name, "MusicFile") == 0){
+            config.music_file = value;
+        } else if(strcmp(name, "DefaultVolume") == 0){
+            config.default_volume = stof(value);
+        } else if(strcmp(name, "CoverFile") == 0){
+            config.cover_file = value;
+        }
+    } else if (strcmp(section, "General") == 0) {
+        if (strcmp(name, "Version") == 0) {
+            config.conf_version = value;
+            if (config.conf_version == iAV_Ver) {
+                return 1;
+            } else if (config.mandatory_version_requirement) {
+                goto r_incompatibility;
+            }
+            if (isVersionInRange(config.conf_version, iAV_Minimum_Compatible_Version, iAV_Ver) || config.conf_version == "*") {
+                std::cout << "Warning: Version isn't the same" << std::endl;
+                std::cout << "警告: 版本与配置不一致" << std::endl;
+            } else {
+                std::cerr << config.conf_version << " Version incompatible! Please change the configuration version: " << iAV_Minimum_Compatible_Version << " ~ " << iAV_Ver << std::endl;
+                std::cerr << config.conf_version << " 版本不兼容！请更改配置版本：" << iAV_Minimum_Compatible_Version << " ~ " << iAV_Ver << std::endl;
+                throw std::runtime_error("Version incompatible");
+            }
+        } else if (strcmp(name, "MandatoryVersionRequirement") == 0) {
+            if (std::string(value) == "true") {
+                config.mandatory_version_requirement = true;
+                if (config.conf_version != iAV_Ver) {
+                    r_incompatibility:
+                    std::cerr << "Version incompatibility (configuration requires the same version)!" << std::endl;
+                    std::cerr << "版本不兼容（配置强制需要相同版本）!" << std::endl;
+                    throw std::runtime_error("Version incompatibility (configuration requires the same version)");
+                }
+            }
+        } else if (strcmp(name, "WindowSize") == 0) {
+            sscanf(value, "%ux%u", &config.main_window_x_size, &config.main_window_y_size);
+            config.windowSize = {config.main_window_x_size, config.main_window_y_size};
+        } 
+    } else if(strcmp(section, "Visualizer") == 0){
+        if (strcmp(name, "ShakeEffect") == 0){
+            if (std::string(value) == "true") {
+                config.shake_effect = true;
+            } else {
+                config.shake_effect = false;
+            }
 
-    if (strcmp(section, "Audio") == 0 && strcmp(name, "music_file") == 0) {
-        *music_file = value;
-    } else if (strcmp(section, "Image") == 0 && strcmp(name, "image_file") == 0) {
-        image_file = value;
+        }
     }
     return 1;
 }
@@ -59,8 +100,47 @@ void printHelp() {
     cout << "  -h, --help            Display this help message" << endl;
     cout << "  -v, --version         Print software version" << endl;
 }
+
+void spectrumThreadFunction(AVAudio& audio, vector<float>& spectrumData, std::mutex& spectrumMutex, std::condition_variable& spectrumCV, bool& stopThread) {
+    while (!stopThread) {
+        // 计算频谱数据
+        vector<float> newSpectrumData = audio.analyzeFrequency(audio.getAudioSamples());
+
+        // 更新频谱数据
+        {
+            std::lock_guard<std::mutex> lock(spectrumMutex);
+            spectrumData = std::move(newSpectrumData);
+        }
+
+        // 通知主线程频谱数据已更新
+        spectrumCV.notify_one();
+
+        // 等待一段时间再进行下一次计算
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+}
+
+void drawSpectrum(const std::vector<float>& magnitudes, sf::RenderWindow& window) {
+    // 创建一个顶点数组来存储频谱数据
+    sf::VertexArray lines(sf::LinesStrip, magnitudes.size());
+
+    // 设置顶点的位置和颜色
+    for (std::size_t i = 0; i < magnitudes.size(); ++i) {
+        lines[i].position = sf::Vector2f(static_cast<float>(i), magnitudes[i]);
+        lines[i].color = sf::Color::White;
+    }
+
+    // 绘制频谱图
+    window.draw(lines);
+}
+
 // 主函数
 int main(int argc, char* argv[]) {
+    int indexs=0;
+    cout<<"iAV Version:"<<iAV_Ver<<endl;
+    // 显示当前运行目录
+    std::filesystem::path currentPath = std::filesystem::current_path();
+    std::cout << "Current working directory: " << currentPath << std::endl;
     // 解析命令行参数
     int opt;
     struct option long_options[] = {
@@ -72,36 +152,45 @@ int main(int argc, char* argv[]) {
     while ((opt = getopt_long(argc, argv, "m:i:c:h:v", long_options, nullptr)) != -1) {
         switch (opt) {
             case 'c':
-                ini_file = optarg;
+                config.ini_file = optarg;
                 break;
             case 'h':
                 printHelp();
                 return 0;
             case 'v':
                 cout<<"Version:"<<iAV_Ver<<endl;
-                break;
+                cout<<"Compile time:"<<__TIME__<<endl;
             default:
                 printHelp();
-                return 1;
         }
     }
+    // 解析INI文件
     try{
-        // 解析INI文件
-        if (ini_parse(ini_file.c_str(), iniHandler, &music_file) < 0) {
-                throw loadException(ini_file,"INI");
+        if (ini_parse(config.ini_file.c_str(), iniHandler, &config.music_file) < 0) {
+                throw loadException(config.ini_file,"INI");
         }
-    }catch(loadException& e){
-        cerr<<e.what()<<endl;
+    }catch(loadException& le){
+        cerr<<le.what()<<endl;
         return 1;
     }
-    // 创建窗口
-    sf::RenderWindow window(sf::VideoMode(main_window_x_size, main_window_y_size), "iAudioVisualizer (iAV)");
+    cout<<"正在播放:"<<config.music_file<<endl;
+    // 初始化窗口
+    sf::RenderWindow window(sf::VideoMode(config.main_window_x_size, config.main_window_y_size), "iAudioVisualizer (iAV)", sf::Style::Close);
+    config.view = window.getDefaultView();
     window.setFramerateLimit(60);
-    
+    // 加载字体
+    sf::Font font;
+    if (!font.loadFromFile("./res/STHeiti Medium.ttc")) {
+        std::cerr << "无法加载字体文件" << std::endl;
+        return -1;
+    }
 
     // 创建音乐
-    AVAudio audio(music_file, music_file);
+    AVAudio audio(config.music_file);
     audio.music.play();
+    audio.volume = config.default_volume;
+    audio.setVolume();
+    cout<<"音乐加载完成"<<endl;
     
     const sf::Int16* samples = audio.buffer.getSamples();
     std::size_t sampleCount = audio.buffer.getSampleCount();
@@ -111,25 +200,58 @@ int main(int argc, char* argv[]) {
     // 存储音频样本数据
     std::vector<sf::Int16> audioSamples(samples, samples + sampleCount);
 
+    // auto aaaa = audio.getAudioSamples();
+    // // 获取当前时间点
+    // auto start = std::chrono::high_resolution_clock::now();
+
+    // // 调用函数
+    // audio.analyzeFrequency(aaaa);
+
+    // // 获取当前时间点
+    // auto end = std::chrono::high_resolution_clock::now();
+
+    // // 计算时间差
+    // std::chrono::duration<double> elapsed = end - start;
+
+    // // 输出执行时间
+    // std::cout << "Elapsed time: " << elapsed.count() << " seconds" << std::endl;
+    // return 0;
 
     // 创建一个滑块
-    sf::RectangleShape sliderBackground(sf::Vector2f(main_window_x_size/2, 20));
-    sliderBackground.setFillColor(sf::Color(255,255,255,40));
+    sf::RectangleShape sliderBackground(sf::Vector2f(config.main_window_x_size/2, 20));
+    sliderBackground.setFillColor(sf::Color(255,255,255,80));
     sliderBackground.setPosition(sfcentershape(window,sliderBackground).x, 10);
 
     sf::RectangleShape sliderHandle(sf::Vector2f(10, 20));
     sliderHandle.setFillColor(sf::Color::Red);
     sliderHandle.setPosition(sfcentershape(window,sliderHandle).x, 10);
 
-
+    // 创建文本对象
+    sf::Text text;
+    text.setFont(font);
+    cout<<"music name:"<<audio.getMusicName()<<endl;
+    text.setString(wstring(audio.getWideMusicName())); // 设置中文字符串
+    //text.setString(L"你好"); // 设置中文字符串
+    srand(time(0));  // 生成随机数种子
     // 主循环
     while (window.isOpen()) {
-        srand(time(0)+rand());  // 生成随机数种子
+        indexs++;
         sf::Event event;// 声明一个 sf::Event 对象，用于存储窗口事件
         // 循环处理窗口事件
         while (window.pollEvent(event)) {
-            sfwindowclose(window, event);  // 检查并关闭 SFML 窗口
+            sfwindowclose(window, event);  // 检查 SFML 窗口事件
+            /*if (event.type == sf::Event::Resized) {
+                // 更新窗口大小变量
+                config.main_window_x_size = event.size.width;
+                config.main_window_y_size = event.size.height;
+                config.windowSize = {config.main_window_x_size, config.main_window_y_size};
 
+                // 更新视图以适应新的窗口大小
+                float aspectRatio = static_cast<float>(event.size.width) / static_cast<float>(event.size.height);
+                config.view.setSize(config.main_window_x_size * aspectRatio, config.main_window_y_size);
+                window.setView(config.view);
+                cout<<window.getSize().y<<" : "<<config.main_window_y_size<<endl;
+            }*/
             // 处理滑块事件
             // 检查是否有鼠标按钮被按下
             if (event.type == sf::Event::MouseButtonPressed && event.mouseButton.button == sf::Mouse::Left) {
@@ -147,11 +269,15 @@ int main(int argc, char* argv[]) {
                 if (audio.music.getStatus() != sf::Music::Playing) {
                     audio.music.play();  // 恢复音频播放
                 }
+                // 根据滑块位置更新音频播放位置
+                float sliderPercentage = (sliderHandle.getPosition().x - sliderBackground.getPosition().x) / sliderBackground.getSize().x;
+                sf::Time newTime = audio.music.getDuration() * sliderPercentage;
+                audio.music.setPlayingOffset(newTime);
+                std::cout << "Audio playing offset set to " << newTime.asSeconds() << " seconds" << std::endl;
                 // 如果鼠标按钮被释放，将滑块手柄颜色设置为红色
                 sliderHandle.setFillColor(sf::Color::Red);
                 std::cout << "Mouse button released" << std::endl;
             }
-
             // 检查鼠标是否移动
             else if (event.type == sf::Event::MouseMoved && sf::Mouse::isButtonPressed(sf::Mouse::Left)) {
                 // 检查鼠标是否在滑块背景上
@@ -170,21 +296,37 @@ int main(int argc, char* argv[]) {
                     sliderHandle.setPosition(newX, sliderHandle.getPosition().y);
                     std::cout << "Slider handle moved to (" << newX << ", " << sliderHandle.getPosition().y << ")" << std::endl;
                     // 根据滑块位置更新音频播放位置
-                    float sliderPercentage = (sliderHandle.getPosition().x - sliderBackground.getPosition().x) / sliderBackground.getSize().x;
-                    sf::Time newTime = audio.music.getDuration() * sliderPercentage;
-                    audio.music.setPlayingOffset(newTime);
-                    std::cout << "Audio playing offset set to " << newTime.asSeconds() << " seconds" << std::endl;
+                    // float sliderPercentage = (sliderHandle.getPosition().x - sliderBackground.getPosition().x) / sliderBackground.getSize().x;
+                    // sf::Time newTime = audio.music.getDuration() * sliderPercentage;
+                    // audio.music.setPlayingOffset(newTime);
+                    // std::cout << "Audio playing offset set to " << newTime.asSeconds() << " seconds" << std::endl;
                 }
             }
 
-            // 检查是否按下空格键
-            else if (event.type == sf::Event::KeyPressed && event.key.code == sf::Keyboard::Space) {
-                if (audio.music.getStatus() == sf::Music::Playing) {
-                    audio.music.pause();  // 暂停音频播放
-                    std::cout << "Music paused" << std::endl;
-                } else if (audio.music.getStatus() != sf::Music::Playing) {
-                    audio.music.play();  // 恢复音频播放
-                    std::cout << "Music resumed" << std::endl;
+            // 检查是否按下键盘
+            else if (event.type == sf::Event::KeyPressed) {
+                //空格键
+                if(event.key.code == sf::Keyboard::Space){
+                    if (audio.music.getStatus() == sf::Music::Playing) {
+                        audio.music.pause();  // 暂停音频播放
+                        std::cout << "Music paused" << std::endl;
+                    } else if (audio.music.getStatus() != sf::Music::Playing) {
+                        audio.music.play();  // 恢复音频播放
+                        std::cout << "Music resumed" << std::endl;
+                    }
+                } else if(event.key.code == sf::Keyboard::Enter){
+                    audio.music.stop();
+                }
+                else if (event.key.code == sf::Keyboard::Up) {
+                    audio.volume += 5.0f;
+                    if (audio.volume > 100.0f) audio.volume = 100.0f;
+                    audio.setVolume();
+                    std::cout << "Volume: " << audio.volume << std::endl;
+                } else if (event.key.code == sf::Keyboard::Down) {
+                    audio.volume -= 5.0f;
+                    if (audio.volume < 0.0f) audio.volume = 0.0f;
+                    audio.setVolume();
+                    std::cout << "Volume: " << audio.volume << std::endl;
                 }
             }
         }
@@ -194,34 +336,9 @@ int main(int argc, char* argv[]) {
             float newX = sliderBackground.getPosition().x + sliderPercentage * sliderBackground.getSize().x - sliderHandle.getSize().x / 2;
             sliderHandle.setPosition(newX, sliderHandle.getPosition().y);
         }
-        
-        
-        // 加载图片
-        sf::Texture imageTexture;
-        if (!imageTexture.loadFromFile(image_file)) {
-            throw std::runtime_error("Failed to load image file");
-        }
-        sf::Sprite sprite(imageTexture);
 
-        // 获取窗口和图片的大小
-        sf::Vector2u windowSize = window.getSize();
-        sf::Vector2u textureSize = imageTexture.getSize();
-
-        // 计算缩放比例
-        float scaleX = static_cast<float>(windowSize.x) / textureSize.x;
-        float scaleY = static_cast<float>(windowSize.x) / textureSize.y;
-
-        // 设置缩放比例
-        sprite.setScale(scaleX, scaleY);
-
-        // 设置图片位置
-        sprite.setPosition(0, 0);
-
-        sprite.setColor(sf::Color(255, 255, 255, 128));  // 设置图片透明度为 128
-
-        // 根据实时音量绘制图形
         // 获取当前播放位置
-        sf::Time currentTime = audio.music.getPlayingOffset();
+        const sf::Time currentTime = audio.music.getPlayingOffset();
         std::size_t currentSample = static_cast<std::size_t>(currentTime.asSeconds() * sampleRate * channelCount);
         float currentVolume = 0;
         std::size_t sampleWindow = 1024;
@@ -233,28 +350,60 @@ int main(int argc, char* argv[]) {
         currentVolume /= sampleWindow;
         // 调整音量范围到合适比例
         float volumeFactor = currentVolume / 16384.0f;  
-        //clog<<"真实音量："<<currentVolume<<"调整后："<<volumeFactor<<endl;
         
+        // 加载图片
+        sf::Texture imageTexture;
+        if (!imageTexture.loadFromFile(config.cover_file)) {
+            throw std::runtime_error("Failed to load image file");
+        }
+        sf::Sprite sprite(imageTexture);
+
+        // 获取窗口和图片的大小
+        sf::Vector2u textureSize = imageTexture.getSize();
+
+        // 计算缩放比例
+        float scaleX = static_cast<float>(config.main_window_x_size) / textureSize.x;
+        float scaleY = static_cast<float>(config.main_window_x_size) / textureSize.y;
+
+        // 设置缩放比例
+        sprite.setScale(scaleX, scaleY);
+
+        // 设置图片位置
+        sprite.setPosition(0, centershape(window,{scaleX, static_cast<float>(config.windowSize.x)}).y);
+        //clog<<centershape(window,{scaleX,scaleY*textureSize.y}).y<<scaleY*textureSize.y<<endl;
+        int bgalphai = 255 - volumeFactor * 255;
+        unsigned bgalpha = bgalphai < 1?3:bgalphai;
+        bgalpha = bgalpha > 255?255:bgalpha;
+        unsigned bgunalpha = volumeFactor * 255 / 2 > 255 ? 255 : volumeFactor * 255 / 2 ;
+        // 根据实时音量设置透明度
+        sprite.setColor(sf::Color(255, 255, 255, bgalpha));
         // 根据实时音量绘制矩形
-        sf::RectangleShape rectangle(sf::Vector2f(4, 150 * volumeFactor + 1));
+        sf::RectangleShape rectangle(sf::Vector2f(4, 200 * volumeFactor + 20));
         rectangle.setRotation(180);
         // 设置矩形的位置，使其在窗口中居中，并将其水平位置向右移动一个矩形的宽度
-        rectangle.setPosition(sfcentershape(window, rectangle).x + rectangle.getGlobalBounds().width, main_window_y_size);
-        rectangle.setFillColor(sf::Color::Magenta);  // 设置矩形颜色为紫色
+        rectangle.setPosition(sfcentershape(window, rectangle).x + rectangle.getGlobalBounds().width, config.main_window_y_size + 19);
+        //rectangle.setFillColor(sf::Color(255, 13, 80, bgalpha));
+        rectangle.setFillColor(sf::Color(255, 13, 40, bgalpha * 2 > 255 ? 255 : bgalpha * 2));
 
         // 根据实时音量绘制圆形
-        sf::CircleShape circle(90 * volumeFactor + main_window_x_size / 8 + rand() % 5 * volumeFactor);
+        sf::CircleShape circle(90 * volumeFactor + config.main_window_x_size / 8 );
         circle.setPosition(sfcentershape(window,circle).x, sfcentershape(window,circle).y);// 设置圆形位置
-        circle.setFillColor(sf::Color::Magenta); 
+        circle.setFillColor(sf::Color(255, 13, 80)); 
         // 绘制带有纹理的圆形
-        sf::CircleShape circleHasTexture(70 * volumeFactor + main_window_x_size / 8);
+        sf::CircleShape circleHasTexture(50 * volumeFactor + config.main_window_x_size / 8);
         circleHasTexture.setPosition(sfcentershape(window,circleHasTexture).x, sfcentershape(window,circleHasTexture).y);// 设置圆形位置
-        circleHasTexture.setFillColor(sf::Color::White);
+        //circleHasTexture.setFillColor(sf::Color::White);
         circleHasTexture.setTexture(&imageTexture); 
+
+        // 设置文本的大小
+        text.setCharacterSize(30 * volumeFactor + 30); // 设置字符大小
+        text.setFillColor(sf::Color::White); // 设置字符颜色
+        text.setPosition(150 - text.getGlobalBounds().width / 2, config.main_window_y_size - 150 - text.getGlobalBounds().height / 2); // 设置文本位置
 
         {// 绘图
             // 绘图前先清空窗口，设置背景颜色为黑色
-            window.clear(sf::Color(0,0,0,0));  
+            window.clear(sf::Color(0, 0, 0, 0));  
+            window.setView(config.view);
             // 绘制图片
             window.draw(sprite);
             // 绘制滑块
@@ -264,23 +413,30 @@ int main(int argc, char* argv[]) {
             {// 绘制矩形
                 window.draw(rectangle);
                 // 向右移动的距离为一个矩形的宽度加上 3 个像素
-                for (int i = 2; i <= 142; i++){
-                    rectangle.setPosition(sfcentershape(window, rectangle).x + rectangle.getGlobalBounds().width * i + 1 * (i - 1) , main_window_y_size + rand() % 10 * volumeFactor);
-                    rectangle.setFillColor(sf::Color(255, 0, 200, 255));
+                for (int i = 2; rectangle.getPosition().x > 0 && rectangle.getPosition().x < config.main_window_x_size ; i++){
+                    rectangle.setPosition(sfcentershape(window, rectangle).x + rectangle.getGlobalBounds().width * i + 1 * (i - 1) , config.main_window_y_size + rand() % 10 * volumeFactor + 19);
+                    rectangle.setFillColor(sf::Color(255, 13, 0 + i * 2 > 255 ? 510 - i * 2 : i * 2, bgalpha * 2 > 255 ? 255 : bgalpha * 2));
                     window.draw(rectangle);
                 }
+                //bgalpha * 2 > 255 ? 255 : bgalpha * 2;
+                // 恢复矩形位置
+                rectangle.setPosition(sfcentershape(window, rectangle).x + rectangle.getGlobalBounds().width, config.main_window_y_size + 19);
                 // 向左移动
-                for (int i = 0; i <= 140; i++){
-                    rectangle.setPosition(sfcentershape(window, rectangle).x - rectangle.getGlobalBounds().width * i - 1 * (i + 1), main_window_y_size  + rand() % 10 * volumeFactor);
-                    rectangle.setFillColor(sf::Color(255, 0, 200, 255));
+                for (int i = 0; rectangle.getPosition().x > 0 && rectangle.getPosition().x < config.main_window_x_size ; i++){
+                    rectangle.setPosition(sfcentershape(window, rectangle).x - rectangle.getGlobalBounds().width * i - 1 * (i + 1), config.main_window_y_size  + rand() % 10 * volumeFactor + 19);
+                    rectangle.setFillColor(sf::Color(255, 13, 0 + i * 2 > 255 ? 510 - i * 2 : i * 2, bgalpha * 2 > 255 ? 255 : bgalpha * 2));
                     window.draw(rectangle);
                 }
             }
             window.draw(circle);
             window.draw(circleHasTexture);
+            window.draw(text);
             window.display();  // 显示绘制的内容
         }
-        
+        // 震动
+        if(audio.music.getStatus() == sf::Music::Playing && config.shake_effect){
+            config.view.setCenter(config.main_window_x_size / 2 + (rand() % 20 - 10) * volumeFactor, config.main_window_y_size / 2 + (rand() % 20 - 10) * volumeFactor);
+        }
     }
 
     return 0;
